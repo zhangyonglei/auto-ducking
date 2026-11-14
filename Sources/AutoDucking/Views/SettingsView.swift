@@ -1,6 +1,10 @@
 import SwiftUI
 import AutoDuckingCore
 
+enum SettingsWindowMetrics {
+    static let contentSize = CGSize(width: 520, height: 530)
+}
+
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var engine: DuckingEngine
@@ -17,7 +21,7 @@ struct SettingsView: View {
             PresetSettingsView(settings: settings)
                 .tabItem { Label("预设", systemImage: "slider.horizontal.3") }
         }
-        .frame(width: 520, height: 430)
+        .frame(width: SettingsWindowMetrics.contentSize.width, height: SettingsWindowMetrics.contentSize.height)
     }
 }
 
@@ -124,9 +128,6 @@ private struct DuckingSettingsView: View {
             }
 
             Section("预览") {
-                LabeledContent("输出") {
-                    Text(engine.outputDeviceName)
-                }
                 LabeledContent("状态") {
                     Text(engine.statusText)
                 }
@@ -159,7 +160,7 @@ private struct PresetSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 8) {
+            VStack(spacing: 10) {
                 ForEach(DuckingPreset.all) { preset in
                     PresetRow(preset: preset, isActive: settings.activePreset == preset) {
                         settings.apply(preset)
@@ -209,7 +210,7 @@ private struct PresetRow: View {
                     .font(.title3)
                     .foregroundStyle(isActive ? Color.accentColor : Color.secondary.opacity(0.45))
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 14)
             .padding(.horizontal, 12)
             .contentShape(Rectangle())
             .background(

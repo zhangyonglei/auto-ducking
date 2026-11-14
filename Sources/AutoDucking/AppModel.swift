@@ -75,7 +75,7 @@ final class AppModel: NSObject, ObservableObject {
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
             window.tabbingMode = .disallowed
-            window.setContentSize(NSSize(width: 520, height: 430))
+            window.setContentSize(SettingsWindowMetrics.contentSize)
             window.delegate = self
             settingsWindow = window
         }
