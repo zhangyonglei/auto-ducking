@@ -87,6 +87,7 @@ swift scripts/generate-icon.swift
 - **麦克风检测**：监听所有输入设备的 `kAudioDevicePropertyDeviceIsRunningSomewhere`，任一设备被占用即视为麦克风开启；设备增删会动态重建监听，无需轮询。
 - **音量控制**：通过 CoreAudio HAL 读写默认输出设备的 `kAudioDevicePropertyVolumeScalar`，兼容仅支持声道音量的设备。
 - **闪避引擎**：状态机记录闪避前的基准音量，淡入/淡出使用 smoothstep 插值；输出设备切换时先恢复旧设备，再对新设备闪避。
+- **资源占用**：菜单栏使用 AppKit `NSStatusItem`，设置与关于窗口按需创建、关闭即释放；空闲常驻内存约 15 MB。
 - **数据安全**：不创建音频采集流，不申请麦克风权限，不写入任何音频数据。
 
 ## 测试

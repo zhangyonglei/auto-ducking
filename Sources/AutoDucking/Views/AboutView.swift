@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct AboutView: View {
-    @Environment(\.dismiss) private var dismiss
+    var onClose: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -40,7 +40,7 @@ struct AboutView: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("好") {
-                    dismiss()
+                    onClose?()
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -115,7 +115,9 @@ private enum AboutInfo {
         return NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil) ?? NSImage()
     }
 
-    static var changelog: String {
+    static let changelog: String = loadChangelog()
+
+    private static func loadChangelog() -> String {
         if let url = Bundle.main.url(forResource: "CHANGELOG", withExtension: "md"),
            let content = try? String(contentsOf: url, encoding: .utf8) {
             return content
