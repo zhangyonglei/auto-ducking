@@ -44,11 +44,13 @@ public enum DuckingStatus: Equatable {
     case ducking
     case restoring
     case unavailable
+    case conference
 }
 
 public final class DuckingEngine: ObservableObject {
     @Published public private(set) var microphoneActive = false
     @Published public private(set) var isDucked = false
+    @Published public private(set) var isConferenceAudio = false
     @Published public private(set) var status: DuckingStatus = .idle
     @Published public private(set) var lastError: String?
 
@@ -56,6 +58,7 @@ public final class DuckingEngine: ObservableObject {
     private let output: OutputVolumeControlling
     private let scheduler: DuckingScheduling
     private let microphone: MicrophoneActivityProviding
+    private let conferenceAudio: ConferenceAudioDetecting
 
     private var baseVolumes: [AudioObjectID: Float] = [:]
     private var activeDeviceID: AudioObjectID = 0
@@ -70,12 +73,14 @@ public final class DuckingEngine: ObservableObject {
         settings: SettingsStore,
         output: OutputVolumeControlling,
         scheduler: DuckingScheduling,
-        microphone: MicrophoneActivityProviding
+        microphone: MicrophoneActivityProviding,
+        conferenceAudio: ConferenceAudioDetecting
     ) {
         self.settings = settings
         self.output = output
         self.scheduler = scheduler
         self.microphone = microphone
+        self.conferenceAudio = conferenceAudio
     }
 
     // MARK: - Lifecycle
@@ -89,6 +94,10 @@ public final class DuckingEngine: ObservableObject {
             self?.microphoneDidChange(active)
         }
         microphone.start()
+
+        conferenceAudio.onConferenceAudioChange = { [weak self] active in
+            self?.conferenceAudioDidChange(active)
+        }
 
         output.onDeviceChange = { [weak self] in
             self?.outputDeviceDidChange()
@@ -104,6 +113,8 @@ public final class DuckingEngine: ObservableObject {
     public func shutdown() {
         microphone.stop()
         microphone.onActivityChange = nil
+        conferenceAudio.stopMonitoring()
+        conferenceAudio.onConferenceAudioChange = nil
         settings.onSettingsChange = nil
         output.onDeviceChange = nil
         restoreTask?.cancel()
@@ -119,6 +130,7 @@ public final class DuckingEngine: ObservableObject {
         baseVolumes.removeAll()
         ducked = false
         isDucked = false
+        isConferenceAudio = false
         restoring = false
     }
 
@@ -134,6 +146,8 @@ public final class DuckingEngine: ObservableObject {
             return "自动闪避已关闭"
         case .unavailable:
             return "当前输出设备无法调节音量"
+        case .conference:
+            return "会议通话中 · 保持原音量"
         case .restoring:
             return "正在恢复背景音量"
         case .ducking:
@@ -149,6 +163,8 @@ public final class DuckingEngine: ObservableObject {
             return "pause.circle"
         case .unavailable:
             return "exclamationmark.triangle"
+        case .conference:
+            return "person.wave.2"
         case .restoring:
             return "speaker.wave.2"
         case .ducking:
@@ -165,9 +181,46 @@ public final class DuckingEngine: ObservableObject {
         microphoneActive = active
 
         if active {
+            isConferenceAudio = false
+            startConferenceMonitoringIfNeeded()
             beginDucking()
-        } else if ducked {
-            scheduleRestore()
+        } else {
+            conferenceAudio.stopMonitoring()
+            isConferenceAudio = false
+            if ducked {
+                scheduleRestore()
+            } else {
+                refreshIdleStatus()
+            }
+        }
+    }
+
+    private func startConferenceMonitoringIfNeeded() {
+        guard settings.isEnabled, settings.bypassConferenceAudio else {
+            conferenceAudio.stopMonitoring()
+            return
+        }
+        conferenceAudio.startMonitoring()
+    }
+
+    func conferenceAudioDidChange(_ active: Bool) {
+        guard settings.isEnabled,
+              settings.bypassConferenceAudio,
+              microphoneActive,
+              active != isConferenceAudio else {
+            return
+        }
+        isConferenceAudio = active
+
+        if active {
+            conferenceAudio.stopMonitoring()
+            if ducked {
+                restore(animated: true)
+            } else {
+                refreshIdleStatus()
+            }
+        } else if settings.isEnabled {
+            beginDucking()
         } else {
             refreshIdleStatus()
         }
@@ -178,6 +231,11 @@ public final class DuckingEngine: ObservableObject {
     private func beginDucking() {
         guard settings.isEnabled else {
             status = .disabled
+            return
+        }
+
+        guard !isConferenceAudio else {
+            refreshIdleStatus()
             return
         }
 
@@ -247,7 +305,13 @@ public final class DuckingEngine: ObservableObject {
         }
 
         restoring = true
-        status = settings.isEnabled ? .restoring : .disabled
+        if !settings.isEnabled {
+            status = .disabled
+        } else if isConferenceAudio {
+            status = .conference
+        } else {
+            status = .restoring
+        }
 
         let start = output.readVolume(deviceID: activeDeviceID) ?? baseVolume
         let duration = animated ? settings.releaseDuration : 0
@@ -315,6 +379,8 @@ public final class DuckingEngine: ObservableObject {
         guard started else { return }
 
         if !settings.isEnabled {
+            conferenceAudio.stopMonitoring()
+            isConferenceAudio = false
             restoreTask?.cancel()
             restoreTask = nil
             previewTask?.cancel()
@@ -324,6 +390,15 @@ public final class DuckingEngine: ObservableObject {
             }
             status = .disabled
             return
+        }
+
+        if settings.bypassConferenceAudio {
+            if microphoneActive && !isConferenceAudio {
+                conferenceAudio.startMonitoring()
+            }
+        } else {
+            conferenceAudio.stopMonitoring()
+            isConferenceAudio = false
         }
 
         if microphoneActive {
@@ -372,7 +447,7 @@ public final class DuckingEngine: ObservableObject {
     // MARK: - Preview
 
     public func preview() {
-        guard settings.isEnabled, !microphoneActive, !ducked else { return }
+        guard settings.isEnabled, !microphoneActive, !ducked, !isConferenceAudio else { return }
         beginDucking()
         guard ducked else { return }
 
@@ -388,6 +463,12 @@ public final class DuckingEngine: ObservableObject {
     // MARK: - Helpers
 
     private func refreshIdleStatus() {
-        status = settings.isEnabled ? .idle : .disabled
+        if !settings.isEnabled {
+            status = .disabled
+        } else if isConferenceAudio {
+            status = .conference
+        } else {
+            status = .idle
+        }
     }
 }

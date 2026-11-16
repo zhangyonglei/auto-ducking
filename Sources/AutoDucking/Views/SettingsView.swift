@@ -34,6 +34,7 @@ private struct GeneralSettingsView: View {
         Form {
             Section {
                 Toggle("启用自动闪避", isOn: $settings.isEnabled)
+                Toggle("会议通话时保持原音量", isOn: $settings.bypassConferenceAudio)
                 Toggle(
                     "登录时自动启动",
                     isOn: Binding(
@@ -44,7 +45,7 @@ private struct GeneralSettingsView: View {
             } header: {
                 Text("行为")
             } footer: {
-                Text("常驻菜单栏。检测到麦克风被占用时降低系统输出音量，结束后恢复。")
+                Text("检测到麦克风被占用时降低系统输出音量，结束后恢复。QQ、钉钉、微信等会议通话中若麦克风与播放来自同一个应用，会保持原音量，避免压低对方人声。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

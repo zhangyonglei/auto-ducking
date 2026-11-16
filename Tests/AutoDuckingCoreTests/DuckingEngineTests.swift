@@ -48,6 +48,23 @@ final class FakeMicrophoneMonitor: MicrophoneActivityProviding {
     }
 }
 
+final class FakeConferenceAudioDetector: ConferenceAudioDetecting {
+    var onConferenceAudioChange: ((Bool) -> Void)?
+    private(set) var isMonitoring = false
+
+    func startMonitoring() {
+        isMonitoring = true
+    }
+
+    func stopMonitoring() {
+        isMonitoring = false
+    }
+
+    func emit(_ active: Bool) {
+        onConferenceAudioChange?(active)
+    }
+}
+
 final class TestScheduler: DuckingScheduling {
     private final class Token: DuckingCancellable {
         var isCancelled = false
@@ -111,6 +128,7 @@ final class DuckingEngineTests: XCTestCase {
     private var output: FakeOutputVolume!
     private var scheduler: TestScheduler!
     private var monitor: FakeMicrophoneMonitor!
+    private var conference: FakeConferenceAudioDetector!
     private var engine: DuckingEngine!
 
     override func setUp() {
@@ -127,11 +145,13 @@ final class DuckingEngineTests: XCTestCase {
         output = FakeOutputVolume(deviceID: 1, volume: 0.8)
         scheduler = TestScheduler()
         monitor = FakeMicrophoneMonitor()
+        conference = FakeConferenceAudioDetector()
         engine = DuckingEngine(
             settings: settings,
             output: output,
             scheduler: scheduler,
-            microphone: monitor
+            microphone: monitor,
+            conferenceAudio: conference
         )
         engine.start()
     }
@@ -274,6 +294,68 @@ final class DuckingEngineTests: XCTestCase {
 
         XCTAssertEqual(output.volumes[1] ?? -1, 0.8, accuracy: 0.0001)
     }
+
+    // MARK: - Conference calls
+
+    func testConferenceAudioStopsDucking() {
+        engine.microphoneDidChange(true)
+        XCTAssertTrue(engine.isDucked)
+
+        conference.emit(true)
+
+        XCTAssertTrue(engine.isConferenceAudio)
+        XCTAssertFalse(engine.isDucked)
+        XCTAssertEqual(output.volumes[1] ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(engine.status, .conference)
+        XCTAssertFalse(conference.isMonitoring)
+    }
+
+    func testConferenceMonitoringStartsWithMicrophoneAndStopsOnRelease() {
+        engine.microphoneDidChange(true)
+        XCTAssertTrue(conference.isMonitoring)
+
+        engine.microphoneDidChange(false)
+        XCTAssertFalse(conference.isMonitoring)
+    }
+
+    func testConferenceDetectionDisabledBySetting() {
+        settings.bypassConferenceAudio = false
+        engine.microphoneDidChange(true)
+
+        XCTAssertFalse(conference.isMonitoring)
+        conference.emit(true)
+
+        XCTAssertTrue(engine.isDucked)
+        XCTAssertFalse(engine.isConferenceAudio)
+        XCTAssertEqual(engine.status, .ducking)
+    }
+
+    func testConferenceStateClearsWhenMicrophoneReleased() {
+        engine.microphoneDidChange(true)
+        conference.emit(true)
+        engine.microphoneDidChange(false)
+
+        XCTAssertFalse(engine.isConferenceAudio)
+        XCTAssertFalse(conference.isMonitoring)
+
+        scheduler.fireScheduledActions()
+
+        XCTAssertEqual(engine.status, .idle)
+        XCTAssertEqual(output.volumes[1] ?? -1, 0.8, accuracy: 0.0001)
+    }
+
+    func testTurningOffConferenceBypassDucksAgain() {
+        engine.microphoneDidChange(true)
+        conference.emit(true)
+        XCTAssertEqual(engine.status, .conference)
+
+        settings.bypassConferenceAudio = false
+
+        XCTAssertTrue(engine.isDucked)
+        XCTAssertFalse(engine.isConferenceAudio)
+        XCTAssertEqual(output.volumes[1] ?? -1, 0.24, accuracy: 0.0001)
+        XCTAssertEqual(engine.status, .ducking)
+    }
 }
 
 final class SettingsStoreTests: XCTestCase {
@@ -329,5 +411,69 @@ final class SettingsStoreTests: XCTestCase {
 
         XCTAssertEqual(reloaded.duckLevel, SettingsStore.duckLevelRange.upperBound, accuracy: 0.0001)
         XCTAssertEqual(reloaded.releaseDelay, SettingsStore.releaseDelayRange.lowerBound, accuracy: 0.0001)
+    }
+
+    func testConferenceBypassDefaultsToEnabled() {
+        XCTAssertTrue(store.bypassConferenceAudio)
+
+        store.bypassConferenceAudio = false
+
+        XCTAssertFalse(SettingsStore(defaults: defaults).bypassConferenceAudio)
+    }
+}
+
+final class AudioProcessesTests: XCTestCase {
+    private func client(
+        pid: pid_t,
+        bundle: String?,
+        input: Bool = false,
+        output: Bool = false
+    ) -> AudioClientProcess {
+        AudioClientProcess(
+            objectID: AudioObjectID(pid),
+            pid: pid,
+            bundleID: bundle,
+            isRunningInput: input,
+            isRunningOutput: output
+        )
+    }
+
+    func testSameProcessMatches() {
+        XCTAssertTrue(AudioProcesses.representsSameApplication(
+            client(pid: 910_001, bundle: "com.tencent.qq", input: true),
+            client(pid: 910_001, bundle: "com.tencent.qq", output: true)
+        ))
+    }
+
+    func testHelperProcessOfSameAppMatches() {
+        XCTAssertTrue(AudioProcesses.representsSameApplication(
+            client(pid: 910_002, bundle: "com.tencent.qq", input: true),
+            client(pid: 910_003, bundle: "com.tencent.qq.helper", output: true)
+        ))
+        XCTAssertTrue(AudioProcesses.representsSameApplication(
+            client(pid: 910_004, bundle: "com.google.Chrome.helper", input: true),
+            client(pid: 910_005, bundle: "com.google.Chrome.helper", output: true)
+        ))
+    }
+
+    func testUnrelatedAppsDoNotMatch() {
+        XCTAssertFalse(AudioProcesses.representsSameApplication(
+            client(pid: 910_006, bundle: "com.alibaba.DingTalkMac", input: true),
+            client(pid: 910_007, bundle: "com.apple.Music", output: true)
+        ))
+        XCTAssertFalse(AudioProcesses.representsSameApplication(
+            client(pid: 910_008, bundle: "com.tencent.qq", input: true),
+            client(pid: 910_009, bundle: "com.tencent.xinWeChat", output: true)
+        ))
+    }
+
+    func testFamilyMembersIncludePlaybackHelpersOnly() {
+        let microphone = client(pid: 910_010, bundle: "com.alibaba.DingTalkMac", input: true)
+        let helper = client(pid: 910_011, bundle: "com.alibaba.DingTalkMac.helper", output: true)
+        let music = client(pid: 910_012, bundle: "com.apple.Music", output: true)
+
+        let family = AudioProcesses.familyMembers(of: microphone, in: [microphone, helper, music])
+
+        XCTAssertEqual(family.map(\.pid), [910_010, 910_011])
     }
 }

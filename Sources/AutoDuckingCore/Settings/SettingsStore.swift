@@ -93,6 +93,7 @@ public final class SettingsStore: ObservableObject {
         static let attack = "autoDucking.attackDuration"
         static let release = "autoDucking.releaseDuration"
         static let releaseDelay = "autoDucking.releaseDelay"
+        static let bypassConference = "autoDucking.bypassConferenceAudio"
     }
 
     private let defaults: UserDefaults
@@ -103,6 +104,13 @@ public final class SettingsStore: ObservableObject {
     @Published public var isEnabled: Bool {
         didSet {
             defaults.set(isEnabled, forKey: Key.enabled)
+            notifyChange()
+        }
+    }
+
+    @Published public var bypassConferenceAudio: Bool {
+        didSet {
+            defaults.set(bypassConferenceAudio, forKey: Key.bypassConference)
             notifyChange()
         }
     }
@@ -138,6 +146,7 @@ public final class SettingsStore: ObservableObject {
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? true
+        bypassConferenceAudio = defaults.object(forKey: Key.bypassConference) as? Bool ?? true
         duckLevel = Self.clamp(
             defaults.object(forKey: Key.duckLevel) as? Double ?? DuckingPreset.standard.duckLevel,
             to: Self.duckLevelRange

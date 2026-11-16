@@ -11,6 +11,7 @@ final class AppModel: NSObject, ObservableObject {
     let settings: SettingsStore
     let output: SystemOutputVolume
     let microphone: MicrophoneMonitor
+    let conferenceAudio: SystemConferenceAudioDetector
     let engine: DuckingEngine
 
     @Published private(set) var launchAtLogin: Bool = false
@@ -25,15 +26,18 @@ final class AppModel: NSObject, ObservableObject {
         let settings = SettingsStore()
         let output = SystemOutputVolume()
         let microphone = MicrophoneMonitor()
+        let conferenceAudio = SystemConferenceAudioDetector()
 
         self.settings = settings
         self.output = output
         self.microphone = microphone
+        self.conferenceAudio = conferenceAudio
         self.engine = DuckingEngine(
             settings: settings,
             output: output,
             scheduler: SystemDuckingScheduler(),
-            microphone: microphone
+            microphone: microphone,
+            conferenceAudio: conferenceAudio
         )
     }
 

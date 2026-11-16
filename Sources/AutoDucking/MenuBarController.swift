@@ -42,6 +42,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let symbol: String
         if !model.settings.isEnabled {
             symbol = "mic.slash"
+        } else if model.engine.isConferenceAudio {
+            symbol = "person.wave.2"
         } else {
             symbol = model.engine.isDucked ? "mic.fill" : "mic"
         }
