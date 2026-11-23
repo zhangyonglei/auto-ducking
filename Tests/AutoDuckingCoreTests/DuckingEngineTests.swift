@@ -50,6 +50,7 @@ final class FakeMicrophoneMonitor: MicrophoneActivityProviding {
 
 final class FakeConferenceAudioDetector: ConferenceAudioDetecting {
     var onConferenceAudioChange: ((Bool) -> Void)?
+    var onMicrophoneOwnerChange: ((MicrophoneApp) -> Void)?
     private(set) var isMonitoring = false
 
     func startMonitoring() {
@@ -62,6 +63,12 @@ final class FakeConferenceAudioDetector: ConferenceAudioDetecting {
 
     func emit(_ active: Bool) {
         onConferenceAudioChange?(active)
+    }
+
+    func emitOwner(bundleID: String, bundleIDs: [String]? = nil) {
+        onMicrophoneOwnerChange?(
+            MicrophoneApp(pid: 42_424, bundleID: bundleID, bundleIDs: bundleIDs ?? [bundleID])
+        )
     }
 }
 
@@ -322,7 +329,10 @@ final class DuckingEngineTests: XCTestCase {
         settings.bypassConferenceAudio = false
         engine.microphoneDidChange(true)
 
+        XCTAssertTrue(conference.isMonitoring)
+        conference.emitOwner(bundleID: "com.example.recorder")
         XCTAssertFalse(conference.isMonitoring)
+
         conference.emit(true)
 
         XCTAssertTrue(engine.isDucked)
@@ -355,6 +365,95 @@ final class DuckingEngineTests: XCTestCase {
         XCTAssertFalse(engine.isConferenceAudio)
         XCTAssertEqual(output.volumes[1] ?? -1, 0.24, accuracy: 0.0001)
         XCTAssertEqual(engine.status, .ducking)
+    }
+
+    // MARK: - Per-app rules
+
+    func testPerAppPresetOverridesGlobalLevel() {
+        settings.setRule(
+            AppDuckingRule(bundleID: "com.tencent.qq", name: "QQ", presetID: DuckingPreset.voice.id)
+        )
+
+        engine.microphoneDidChange(true)
+        conference.emitOwner(bundleID: "com.tencent.qq")
+
+        XCTAssertEqual(
+            engine.effectiveParameters.duckLevel,
+            DuckingPreset.voice.duckLevel,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            output.volumes[1] ?? -1,
+            Float(0.8 * DuckingPreset.voice.duckLevel),
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(scheduler.ramps.last?.duration, DuckingPreset.voice.attackDuration)
+    }
+
+    func testPerAppBypassFalseIgnoresConferenceAudio() {
+        settings.setRule(
+            AppDuckingRule(bundleID: "com.tencent.xinWeChat", name: "微信", bypassOriginalVolume: false)
+        )
+
+        engine.microphoneDidChange(true)
+        conference.emitOwner(bundleID: "com.tencent.xinWeChat")
+        XCTAssertFalse(conference.isMonitoring)
+
+        conference.emit(true)
+
+        XCTAssertFalse(engine.isConferenceAudio)
+        XCTAssertTrue(engine.isDucked)
+        XCTAssertEqual(output.volumes[1] ?? -1, 0.24, accuracy: 0.0001)
+        XCTAssertEqual(engine.status, .ducking)
+    }
+
+    func testPerAppBypassTrueOverridesDisabledGlobalSetting() {
+        settings.bypassConferenceAudio = false
+        settings.setRule(
+            AppDuckingRule(
+                bundleID: "com.alibaba.DingTalkMac",
+                name: "钉钉",
+                bypassOriginalVolume: true
+            )
+        )
+
+        engine.microphoneDidChange(true)
+        XCTAssertTrue(conference.isMonitoring)
+
+        conference.emitOwner(bundleID: "com.alibaba.DingTalkMac")
+        conference.emit(true)
+
+        XCTAssertTrue(engine.isConferenceAudio)
+        XCTAssertFalse(engine.isDucked)
+        XCTAssertEqual(output.volumes[1] ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(engine.status, .conference)
+    }
+
+    func testPerAppRulePresetControlsRestoreDelay() {
+        settings.setRule(
+            AppDuckingRule(bundleID: "com.tencent.qq", name: "QQ", presetID: DuckingPreset.voice.id)
+        )
+
+        engine.microphoneDidChange(true)
+        conference.emitOwner(bundleID: "com.tencent.qq")
+        engine.microphoneDidChange(false)
+
+        XCTAssertEqual(scheduler.pendingDelays, [DuckingPreset.voice.releaseDelay])
+    }
+
+    func testHelperBundleUsesSameAppRule() {
+        settings.setRule(
+            AppDuckingRule(bundleID: "com.tencent.qq", name: "QQ", presetID: DuckingPreset.voice.id)
+        )
+
+        engine.microphoneDidChange(true)
+        conference.emitOwner(bundleID: "com.tencent.qq.helper")
+
+        XCTAssertEqual(
+            engine.effectiveParameters.duckLevel,
+            DuckingPreset.voice.duckLevel,
+            accuracy: 0.0001
+        )
     }
 }
 
@@ -419,6 +518,49 @@ final class SettingsStoreTests: XCTestCase {
         store.bypassConferenceAudio = false
 
         XCTAssertFalse(SettingsStore(defaults: defaults).bypassConferenceAudio)
+    }
+
+    func testAppRulesPersistAndMatchHelperBundle() {
+        store.setRule(
+            AppDuckingRule(
+                bundleID: "com.tencent.qq",
+                name: "QQ",
+                presetID: DuckingPreset.voice.id,
+                bypassOriginalVolume: false
+            )
+        )
+
+        let reloaded = SettingsStore(defaults: defaults)
+        let rule = reloaded.rule(matching: ["com.tencent.qq.helper"])
+
+        XCTAssertEqual(rule?.name, "QQ")
+        XCTAssertEqual(rule?.presetID, DuckingPreset.voice.id)
+        XCTAssertEqual(rule?.bypassOriginalVolume, false)
+    }
+
+    func testAppRuleKeepsGlobalValuesForUnsetFields() {
+        store.apply(.standard)
+        store.bypassConferenceAudio = true
+        store.setRule(
+            AppDuckingRule(bundleID: "com.apple.Music", name: "音乐", presetID: DuckingPreset.gentle.id)
+        )
+
+        let parameters = store.parameters(for: ["com.apple.Music"])
+        XCTAssertEqual(parameters.duckLevel, DuckingPreset.gentle.duckLevel, accuracy: 0.0001)
+        XCTAssertTrue(parameters.bypassOriginalVolume)
+
+        let global = store.parameters(for: ["com.example.other"])
+        XCTAssertEqual(global.duckLevel, DuckingPreset.standard.duckLevel, accuracy: 0.0001)
+    }
+
+    func testRemovingAppRuleFallsBackToGlobalParameters() {
+        store.setRule(
+            AppDuckingRule(bundleID: "com.tencent.qq", name: "QQ", bypassOriginalVolume: false)
+        )
+        store.removeRule(bundleID: "com.tencent.qq")
+
+        XCTAssertTrue(store.appRules.isEmpty)
+        XCTAssertTrue(store.parameters(for: ["com.tencent.qq"]).bypassOriginalVolume)
     }
 }
 

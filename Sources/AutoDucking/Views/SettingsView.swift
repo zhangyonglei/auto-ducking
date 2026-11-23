@@ -20,6 +20,9 @@ struct SettingsView: View {
 
             PresetSettingsView(settings: settings)
                 .tabItem { Label("预设", systemImage: "slider.horizontal.3") }
+
+            AppRulesSettingsView(settings: settings, engine: engine, app: app)
+                .tabItem { Label("应用", systemImage: "app.badge") }
         }
         .frame(width: SettingsWindowMetrics.contentSize.width, height: SettingsWindowMetrics.contentSize.height)
     }
@@ -45,7 +48,7 @@ private struct GeneralSettingsView: View {
             } header: {
                 Text("行为")
             } footer: {
-                Text("检测到麦克风被占用时降低系统输出音量，结束后恢复。QQ、钉钉、微信等会议通话中若麦克风与播放来自同一个应用，会保持原音量，避免压低对方人声。")
+                Text("检测到麦克风被占用时降低系统输出音量，结束后恢复。QQ、钉钉、微信等会议通话中若麦克风与播放来自同一个应用，会保持原音量，避免压低对方人声。可在「应用」页为单个应用单独指定预设与是否保持原音量。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -224,5 +227,211 @@ private struct PresetRow: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct AppRulesSettingsView: View {
+    @ObservedObject var settings: SettingsStore
+    @ObservedObject var engine: DuckingEngine
+    @ObservedObject var app: AppModel
+
+    struct Entry: Identifiable {
+        let bundleID: String
+        let name: String
+
+        var id: String { bundleID }
+    }
+
+    private var entries: [Entry] {
+        var result = settings.appRules.map { Entry(bundleID: $0.bundleID, name: $0.name) }
+        let configured = Set(settings.appRules.map(\.bundleID))
+        for recent in app.recentMicrophoneApps where !configured.contains(recent.bundleID) {
+            result.append(Entry(bundleID: recent.bundleID, name: recent.name))
+        }
+        return result
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("应用规则")
+                        .font(.headline)
+                    Text("为单个应用指定闪避预设，并决定通话时是否保持原音量。未设置的应用跟随「通用」页。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Button("添加应用…") {
+                    app.promptForAppRule()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            if entries.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "app.badge.checkmark")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.tertiary)
+                    Text("还没有应用使用过麦克风")
+                        .font(.callout)
+                    Text("应用使用麦克风后会出现在这里，也可以点「添加应用…」手动选择。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(entries) { entry in
+                    AppRuleRow(entry: entry, settings: settings, engine: engine, app: app)
+                        .padding(.vertical, 2)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct AppRuleRow: View {
+    let entry: AppRulesSettingsView.Entry
+    @ObservedObject var settings: SettingsStore
+    @ObservedObject var engine: DuckingEngine
+    let app: AppModel
+
+    private var rule: AppDuckingRule? {
+        settings.appRules.first { $0.bundleID == entry.bundleID }
+    }
+
+    private var isCurrentMicrophoneApp: Bool {
+        guard let microphoneApp = engine.microphoneApp else { return false }
+        return microphoneApp.bundleIDs.contains { candidate in
+            candidate == entry.bundleID
+                || candidate.hasPrefix(entry.bundleID + ".")
+                || entry.bundleID.hasPrefix(candidate + ".")
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            icon
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(entry.name)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    if isCurrentMicrophoneApp && engine.microphoneActive {
+                        Text("当前")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    pickerGroup("闪避") {
+                        Picker("闪避方案", selection: presetBinding) {
+                            Text("跟随全局").tag(String?.none)
+                            ForEach(DuckingPreset.all) { preset in
+                                Text(preset.name).tag(String?.some(preset.id))
+                            }
+                        }
+                        .frame(width: 106)
+                    }
+
+                    pickerGroup("原音量") {
+                        Picker("通话原音量", selection: bypassBinding) {
+                            Text("跟随全局").tag(Bool?.none)
+                            Text("保持").tag(Bool?.some(true))
+                            Text("闪避").tag(Bool?.some(false))
+                        }
+                        .frame(width: 96)
+                    }
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                settings.removeRule(bundleID: entry.bundleID)
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("移除规则，改为跟随全局设置")
+            .opacity(rule == nil ? 0 : 1)
+            .disabled(rule == nil)
+        }
+        .padding(.vertical, 3)
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let image = app.icon(forBundleID: entry.bundleID) {
+            Image(nsImage: image)
+                .resizable()
+                .frame(width: 28, height: 28)
+        } else {
+            Image(systemName: "app")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+        }
+    }
+
+    private func pickerGroup<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            content()
+                .labelsHidden()
+                .pickerStyle(.menu)
+        }
+    }
+
+    private var presetBinding: Binding<String?> {
+        Binding(
+            get: { rule?.presetID },
+            set: { newValue in
+                var updated = rule ?? AppDuckingRule(bundleID: entry.bundleID, name: entry.name)
+                updated.presetID = newValue
+                save(updated)
+            }
+        )
+    }
+
+    private var bypassBinding: Binding<Bool?> {
+        Binding(
+            get: { rule?.bypassOriginalVolume },
+            set: { newValue in
+                var updated = rule ?? AppDuckingRule(bundleID: entry.bundleID, name: entry.name)
+                updated.bypassOriginalVolume = newValue
+                save(updated)
+            }
+        )
+    }
+
+    private func save(_ updated: AppDuckingRule) {
+        if updated.presetID == nil && updated.bypassOriginalVolume == nil {
+            settings.removeRule(bundleID: entry.bundleID)
+        } else {
+            settings.setRule(updated)
+        }
     }
 }

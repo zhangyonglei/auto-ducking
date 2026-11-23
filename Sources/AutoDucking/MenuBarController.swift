@@ -72,8 +72,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         device.isEnabled = false
         menu.addItem(device)
 
+        if engine.microphoneActive, let appName = model.microphoneAppName {
+            let microphone = NSMenuItem(title: "麦克风：\(appName)", action: nil, keyEquivalent: "")
+            microphone.isEnabled = false
+            menu.addItem(microphone)
+        }
+
         let level = NSMenuItem(
-            title: "闪避后为原音量的 \(settings.duckLevelPercent)%",
+            title: "闪避后为原音量的 \(Int((engine.effectiveParameters.duckLevel * 100).rounded()))%",
             action: nil,
             keyEquivalent: ""
         )

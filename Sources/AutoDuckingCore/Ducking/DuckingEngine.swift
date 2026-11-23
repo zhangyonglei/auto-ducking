@@ -51,6 +51,7 @@ public final class DuckingEngine: ObservableObject {
     @Published public private(set) var microphoneActive = false
     @Published public private(set) var isDucked = false
     @Published public private(set) var isConferenceAudio = false
+    @Published public private(set) var microphoneApp: MicrophoneApp?
     @Published public private(set) var status: DuckingStatus = .idle
     @Published public private(set) var lastError: String?
 
@@ -65,6 +66,7 @@ public final class DuckingEngine: ObservableObject {
     private var restoreTask: DuckingCancellable?
     private var rampTask: DuckingCancellable?
     private var previewTask: DuckingCancellable?
+    private var sessionParameters: DuckingParameters?
     private var ducked = false
     private var restoring = false
     private var started = false
@@ -98,6 +100,9 @@ public final class DuckingEngine: ObservableObject {
         conferenceAudio.onConferenceAudioChange = { [weak self] active in
             self?.conferenceAudioDidChange(active)
         }
+        conferenceAudio.onMicrophoneOwnerChange = { [weak self] app in
+            self?.microphoneAppDidChange(app)
+        }
 
         output.onDeviceChange = { [weak self] in
             self?.outputDeviceDidChange()
@@ -115,6 +120,7 @@ public final class DuckingEngine: ObservableObject {
         microphone.onActivityChange = nil
         conferenceAudio.stopMonitoring()
         conferenceAudio.onConferenceAudioChange = nil
+        conferenceAudio.onMicrophoneOwnerChange = nil
         settings.onSettingsChange = nil
         output.onDeviceChange = nil
         restoreTask?.cancel()
@@ -123,6 +129,7 @@ public final class DuckingEngine: ObservableObject {
         restoreTask = nil
         rampTask = nil
         previewTask = nil
+        sessionParameters = nil
 
         for (deviceID, volume) in baseVolumes {
             output.writeVolume(volume, deviceID: deviceID)
@@ -131,6 +138,7 @@ public final class DuckingEngine: ObservableObject {
         ducked = false
         isDucked = false
         isConferenceAudio = false
+        microphoneApp = nil
         restoring = false
     }
 
@@ -138,6 +146,11 @@ public final class DuckingEngine: ObservableObject {
 
     public var outputDeviceName: String {
         output.deviceName ?? "未知输出设备"
+    }
+
+    /// 当前生效的闪避参数：识别到麦克风占用方且配置了应用规则时，使用该应用的规则。
+    public var effectiveParameters: DuckingParameters {
+        settings.parameters(for: microphoneApp?.bundleIDs ?? [])
     }
 
     public var statusText: String {
@@ -182,11 +195,14 @@ public final class DuckingEngine: ObservableObject {
 
         if active {
             isConferenceAudio = false
-            startConferenceMonitoringIfNeeded()
+            microphoneApp = nil
+            sessionParameters = nil
+            refreshMonitoring()
             beginDucking()
         } else {
             conferenceAudio.stopMonitoring()
             isConferenceAudio = false
+            microphoneApp = nil
             if ducked {
                 scheduleRestore()
             } else {
@@ -195,21 +211,51 @@ public final class DuckingEngine: ObservableObject {
         }
     }
 
-    private func startConferenceMonitoringIfNeeded() {
-        guard settings.isEnabled, settings.bypassConferenceAudio else {
+    private func refreshMonitoring() {
+        guard settings.isEnabled, microphoneActive else {
             conferenceAudio.stopMonitoring()
             return
         }
+
+        if isConferenceAudio {
+            conferenceAudio.stopMonitoring()
+            return
+        }
+
+        // 占用方尚未识别时先枚举一次；识别后只在需要判断会议通话（保持原音量）时继续轮询。
+        if let app = microphoneApp, !settings.parameters(for: app.bundleIDs).bypassOriginalVolume {
+            conferenceAudio.stopMonitoring()
+            return
+        }
+
         conferenceAudio.startMonitoring()
+    }
+
+    func microphoneAppDidChange(_ app: MicrophoneApp) {
+        guard settings.isEnabled, microphoneActive else { return }
+        guard app != microphoneApp else { return }
+        microphoneApp = app
+
+        if !settings.parameters(for: app.bundleIDs).bypassOriginalVolume {
+            conferenceAudio.stopMonitoring()
+            isConferenceAudio = false
+        }
+
+        beginDucking()
     }
 
     func conferenceAudioDidChange(_ active: Bool) {
         guard settings.isEnabled,
-              settings.bypassConferenceAudio,
               microphoneActive,
               active != isConferenceAudio else {
             return
         }
+
+        guard effectiveParameters.bypassOriginalVolume else {
+            isConferenceAudio = false
+            return
+        }
+
         isConferenceAudio = active
 
         if active {
@@ -259,15 +305,19 @@ public final class DuckingEngine: ObservableObject {
         }
         guard let baseVolume = baseVolumes[deviceID] else { return }
 
-        let target = min(1, max(0, baseVolume * Float(settings.duckLevel)))
+        let parameters = effectiveParameters
+        sessionParameters = parameters
+
+        let target = min(1, max(0, baseVolume * Float(parameters.duckLevel)))
         ducked = true
         isDucked = true
+        restoring = false
         status = .ducking
 
         performRamp(
             from: currentVolume,
             to: target,
-            duration: settings.attackDuration,
+            duration: parameters.attackDuration,
             deviceID: deviceID
         )
     }
@@ -276,7 +326,7 @@ public final class DuckingEngine: ObservableObject {
         restoreTask?.cancel()
         restoreTask = nil
 
-        let delay = max(0, settings.releaseDelay)
+        let delay = max(0, sessionParameters?.releaseDelay ?? settings.releaseDelay)
         guard delay > 0.01 else {
             restore(animated: true)
             return
@@ -314,7 +364,7 @@ public final class DuckingEngine: ObservableObject {
         }
 
         let start = output.readVolume(deviceID: activeDeviceID) ?? baseVolume
-        let duration = animated ? settings.releaseDuration : 0
+        let duration = animated ? (sessionParameters?.releaseDuration ?? settings.releaseDuration) : 0
 
         performRamp(
             from: start,
@@ -335,6 +385,7 @@ public final class DuckingEngine: ObservableObject {
         ducked = false
         isDucked = false
         restoring = false
+        sessionParameters = nil
         refreshIdleStatus()
     }
 
@@ -381,6 +432,7 @@ public final class DuckingEngine: ObservableObject {
         if !settings.isEnabled {
             conferenceAudio.stopMonitoring()
             isConferenceAudio = false
+            microphoneApp = nil
             restoreTask?.cancel()
             restoreTask = nil
             previewTask?.cancel()
@@ -392,12 +444,9 @@ public final class DuckingEngine: ObservableObject {
             return
         }
 
-        if settings.bypassConferenceAudio {
-            if microphoneActive && !isConferenceAudio {
-                conferenceAudio.startMonitoring()
-            }
-        } else {
-            conferenceAudio.stopMonitoring()
+        refreshMonitoring()
+
+        if isConferenceAudio && !effectiveParameters.bypassOriginalVolume {
             isConferenceAudio = false
         }
 
@@ -426,6 +475,7 @@ public final class DuckingEngine: ObservableObject {
         ducked = false
         isDucked = false
         restoring = false
+        sessionParameters = nil
         activeDeviceID = newDeviceID
 
         if settings.isEnabled && microphoneActive {

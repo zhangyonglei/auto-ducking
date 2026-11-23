@@ -81,6 +81,65 @@ public struct DuckingPreset: Identifiable, Hashable, Sendable {
     public static let all: [DuckingPreset] = [.voice, .standard, .meeting, .focus, .gentle]
 }
 
+/// 单个应用的闪避规则。两个可选项为 nil 时表示跟随「通用」页的全局设置。
+public struct AppDuckingRule: Identifiable, Codable, Hashable, Sendable {
+    public var bundleID: String
+    public var name: String
+    public var presetID: String?
+    public var bypassOriginalVolume: Bool?
+
+    public var id: String { bundleID }
+
+    public init(
+        bundleID: String,
+        name: String,
+        presetID: String? = nil,
+        bypassOriginalVolume: Bool? = nil
+    ) {
+        self.bundleID = bundleID
+        self.name = name
+        self.presetID = presetID
+        self.bypassOriginalVolume = bypassOriginalVolume
+    }
+
+    public var preset: DuckingPreset? {
+        guard let presetID else { return nil }
+        return DuckingPreset.all.first { $0.id == presetID }
+    }
+
+    /// 规则的应用 bundle 与音频进程的 bundle（含 helper 子进程）是否属于同一应用。
+    public func matches(bundleIDs: [String]) -> Bool {
+        bundleIDs.contains { candidate in
+            guard !candidate.isEmpty else { return false }
+            return candidate == bundleID
+                || candidate.hasPrefix(bundleID + ".")
+                || bundleID.hasPrefix(candidate + ".")
+        }
+    }
+}
+
+public struct DuckingParameters: Equatable, Sendable {
+    public var duckLevel: Double
+    public var attackDuration: Double
+    public var releaseDuration: Double
+    public var releaseDelay: Double
+    public var bypassOriginalVolume: Bool
+
+    public init(
+        duckLevel: Double,
+        attackDuration: Double,
+        releaseDuration: Double,
+        releaseDelay: Double,
+        bypassOriginalVolume: Bool
+    ) {
+        self.duckLevel = duckLevel
+        self.attackDuration = attackDuration
+        self.releaseDuration = releaseDuration
+        self.releaseDelay = releaseDelay
+        self.bypassOriginalVolume = bypassOriginalVolume
+    }
+}
+
 public final class SettingsStore: ObservableObject {
     public static let duckLevelRange: ClosedRange<Double> = 0.05...0.90
     public static let attackRange: ClosedRange<Double> = 0...1.5
@@ -94,6 +153,7 @@ public final class SettingsStore: ObservableObject {
         static let release = "autoDucking.releaseDuration"
         static let releaseDelay = "autoDucking.releaseDelay"
         static let bypassConference = "autoDucking.bypassConferenceAudio"
+        static let appRules = "autoDucking.appRules"
     }
 
     private let defaults: UserDefaults
@@ -143,6 +203,13 @@ public final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published public var appRules: [AppDuckingRule] {
+        didSet {
+            persistAppRules()
+            notifyChange()
+        }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? true
@@ -163,6 +230,65 @@ public final class SettingsStore: ObservableObject {
             defaults.object(forKey: Key.releaseDelay) as? Double ?? DuckingPreset.standard.releaseDelay,
             to: Self.releaseDelayRange
         )
+        if let data = defaults.data(forKey: Key.appRules),
+           let stored = try? JSONDecoder().decode([AppDuckingRule].self, from: data) {
+            var seen = Set<String>()
+            appRules = stored.filter { !$0.bundleID.isEmpty && seen.insert($0.bundleID).inserted }
+        } else {
+            appRules = []
+        }
+    }
+
+    public var globalParameters: DuckingParameters {
+        DuckingParameters(
+            duckLevel: duckLevel,
+            attackDuration: attackDuration,
+            releaseDuration: releaseDuration,
+            releaseDelay: releaseDelay,
+            bypassOriginalVolume: bypassConferenceAudio
+        )
+    }
+
+    /// 与应用音频进程（含 helper 子进程）匹配的规则。
+    public func rule(matching bundleIDs: [String]) -> AppDuckingRule? {
+        guard !bundleIDs.isEmpty else { return nil }
+        return appRules.first { $0.matches(bundleIDs: bundleIDs) }
+    }
+
+    /// 某个应用实际使用的闪避参数：应用规则优先，未设置的项回落到全局设置。
+    public func parameters(for bundleIDs: [String]) -> DuckingParameters {
+        var parameters = globalParameters
+        guard let rule = rule(matching: bundleIDs) else { return parameters }
+
+        if let preset = rule.preset {
+            parameters.duckLevel = preset.duckLevel
+            parameters.attackDuration = preset.attackDuration
+            parameters.releaseDuration = preset.releaseDuration
+            parameters.releaseDelay = preset.releaseDelay
+        }
+        if let bypass = rule.bypassOriginalVolume {
+            parameters.bypassOriginalVolume = bypass
+        }
+        return parameters
+    }
+
+    public func setRule(_ rule: AppDuckingRule) {
+        if let index = appRules.firstIndex(where: { $0.bundleID == rule.bundleID }) {
+            guard appRules[index] != rule else { return }
+            appRules[index] = rule
+        } else {
+            appRules.append(rule)
+        }
+    }
+
+    public func removeRule(bundleID: String) {
+        guard appRules.contains(where: { $0.bundleID == bundleID }) else { return }
+        appRules.removeAll { $0.bundleID == bundleID }
+    }
+
+    private func persistAppRules() {
+        guard let data = try? JSONEncoder().encode(appRules) else { return }
+        defaults.set(data, forKey: Key.appRules)
     }
 
     public var activePreset: DuckingPreset? {

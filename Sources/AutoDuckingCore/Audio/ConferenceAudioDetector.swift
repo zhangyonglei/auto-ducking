@@ -1,8 +1,21 @@
 import CoreAudio
 import Foundation
 
+public struct MicrophoneApp: Equatable, Sendable {
+    public let pid: pid_t
+    public let bundleID: String?
+    public let bundleIDs: [String]
+
+    public init(pid: pid_t, bundleID: String?, bundleIDs: [String]) {
+        self.pid = pid
+        self.bundleID = bundleID
+        self.bundleIDs = bundleIDs
+    }
+}
+
 public protocol ConferenceAudioDetecting: AnyObject {
     var onConferenceAudioChange: ((Bool) -> Void)? { get set }
+    var onMicrophoneOwnerChange: ((MicrophoneApp) -> Void)? { get set }
     func startMonitoring()
     func stopMonitoring()
 }
@@ -14,6 +27,7 @@ public protocol ConferenceAudioDetecting: AnyObject {
 /// 避免在会议里把对方人声压低。
 public final class SystemConferenceAudioDetector: ConferenceAudioDetecting {
     public var onConferenceAudioChange: ((Bool) -> Void)?
+    public var onMicrophoneOwnerChange: ((MicrophoneApp) -> Void)?
 
     private let queue = DispatchQueue(label: "com.zyl.AutoDucking.conference-detector")
     private var timer: DispatchSourceTimer?
@@ -22,6 +36,7 @@ public final class SystemConferenceAudioDetector: ConferenceAudioDetecting {
     private var familyObjectIDs: [AudioObjectID] = []
     private var matchedTicks = 0
     private var tickCount = 0
+    private var reportedOwner: MicrophoneApp?
 
     private static let pollInterval: TimeInterval = 0.35
     private static let requiredMatches = 2
@@ -36,6 +51,7 @@ public final class SystemConferenceAudioDetector: ConferenceAudioDetecting {
             self.matchedTicks = 0
             self.tickCount = 0
             self.familyObjectIDs = []
+            self.reportedOwner = nil
             ProcessTree.resetCache()
             self.installProcessListListener()
             self.refreshFamily()
@@ -102,15 +118,28 @@ public final class SystemConferenceAudioDetector: ConferenceAudioDetecting {
 
         let clients = AudioProcesses.snapshot()
         let owners = clients.filter(\.isRunningInput)
-        guard !owners.isEmpty else { return }
+        guard let owner = owners.first else { return }
 
         var members: Set<AudioObjectID> = []
-        for owner in owners {
-            for member in AudioProcesses.familyMembers(of: owner, in: clients) {
+        for candidate in owners {
+            for member in AudioProcesses.familyMembers(of: candidate, in: clients) {
                 members.insert(member.objectID)
             }
         }
         familyObjectIDs = members.sorted()
+        reportOwnerIfNeeded(owner, in: clients)
+    }
+
+    private func reportOwnerIfNeeded(_ owner: AudioClientProcess, in clients: [AudioClientProcess]) {
+        let family = AudioProcesses.familyMembers(of: owner, in: clients)
+        let bundleIDs = Set(family.compactMap(\.bundleID).filter { !$0.isEmpty }).sorted()
+        let app = MicrophoneApp(pid: owner.pid, bundleID: owner.bundleID, bundleIDs: bundleIDs)
+        guard app != reportedOwner else { return }
+        reportedOwner = app
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onMicrophoneOwnerChange?(app)
+        }
     }
 
     private func report() {
